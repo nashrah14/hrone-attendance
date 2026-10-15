@@ -1,0 +1,34 @@
+# REVIEW.md
+# Code Review — Starter `app/main.py`
+
+This review records defects identified in the starter implementation, how they can be reproduced, and the corresponding fixes. Findings are based on code inspection and API behavior; each item should be retained only when confirmed against the original starter.
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | `POST /employees` — employee creation | Duplicate employee codes must be rejected consistently rather than creating duplicate identities. | Submit the same `emp_code` twice. The second request should return `409 Conflict`. | Enforce a unique MongoDB index on `emp_code` and translate `DuplicateKeyError` into HTTP 409. |
+| 2 | `POST /attendance/punch-in` — record creation | Concurrent punch-in requests for the same employee and attendance date can create duplicate records if uniqueness is checked only in application code. | Send concurrent punch-in requests for the same employee/date. Exactly one should succeed; the others should return 409. | Enforce a unique compound index on `(emp_code, date)` and handle duplicate-key errors. |
+| 3 | `POST /attendance/punch-out` — record update | Punch-out must reject requests when no matching attendance record exists or the record has already been punched out. | Try punching out before punching in, then try punching out twice. Expect 404 for the missing record and 409 for the repeated punch-out. | Validate the record state and use an atomic conditional update so concurrent requests cannot both complete the punch-out. |
+| 4 | Timestamp parsing and storage helpers | API timestamps must be epoch milliseconds, truncated to whole seconds before calculations and storage. | Submit a timestamp in seconds rather than milliseconds; it should be rejected with 422. Test timestamps containing fractional seconds. | Validate millisecond timestamps and normalize instants to whole seconds consistently. |
+| 5 | Attendance-date and shift helpers | Attendance dates must follow the specified IST shift rules, including shifts that cross midnight. | Test punches around midnight for a normal shift and an overnight shift. | Derive the attendance date using the shift rules and IST rather than relying on the server's local timezone. |
+| 6 | Late-minute calculation | The 10-minute grace period must be applied strictly: a punch-in at exactly 09:40:00 for a 09:30 shift is not late, while 09:40:01 produces 10 late minutes. | Test timestamps immediately before, at, and after the grace-period boundary. | Apply the strict threshold and floor the qualifying lateness to whole minutes. |
+| 7 | Overtime calculation | Overtime must count only when the employee works at least 30 whole minutes beyond shift end. | Test punch-outs just below, exactly at, and above the 30-minute threshold. | Calculate whole minutes beyond the correct shift end and return overtime only when the threshold is met. |
+| 8 | Work-hours and half-day helpers | Work hours must be rounded to two decimal places using half-up rounding, and half-day status must be derived after punch-out from the rounded hours. | Test durations near rounding boundaries and around 4.50 hours. | Apply the required rounding rule and derive `half_day` only after punch-out. |
+| 9 | Attendance regularization endpoint | Manual corrections must preserve an audit trail, and a request that makes no change should not create a misleading history entry. | Submit a correction with a reason and actor; inspect `history`. Repeat with identical values and verify the no-op is rejected. | Record the actor, reason, timestamp, and before/after changes; reject no-op corrections. |
+| 10 | Attendance regularization concurrency | Concurrent corrections must not overwrite one another's audit history. | Issue simultaneous corrections and verify that all accepted changes are represented in the final record's history. | Use an atomic update strategy that preserves history under concurrent changes. |
+| 11 | Analytics aggregation helpers/endpoints | Analytics must follow the specified attendance, headcount, working-day, half-day, and rounding rules, and must use MongoDB aggregation pipelines. | Test a month containing employees without attendance logs, mid-month joiners, weekends, leave, WFH, and half-day records. Compare every metric with expected results. | Implement the calculations in MongoDB aggregation pipelines and apply the required inclusion and rounding rules. |
+| 12 | `GET /analytics/leaderboard/late` | Employees tied at the ranking cutoff should not be dropped arbitrarily. | Create a tie at the requested rank limit and verify all employees tied at that rank are returned. | Use ranking semantics that include cutoff ties, then apply a deterministic secondary sort for response ordering. |
+| 13 | `GET /admin/explain/{endpoint}` | Explain output must use the same relevant filters and query pipeline as the corresponding real endpoint. A simplified or different pipeline does not explain the actual query plan. | Compare the explain request parameters and pipeline with the matching endpoint, particularly for department summary and department trend. | Build explain input from the same pipeline/filter builders used by the actual endpoint, including relevant sorting and pagination. |
+
+## Inspected behavior that was not considered a defect
+
+- **Duplicate employee creation returns 409:** This is the expected conflict response when `emp_code` is already registered.
+- **Punch-out before punch-in returns 404:** There is no attendance record to complete.
+- **Repeated punch-out returns 409:** An already completed attendance record must not be completed again.
+- **Timestamps expressed in seconds are rejected:** The API contract uses epoch milliseconds.
+- **A no-op regularization returns 422:** An unchanged record does not need a new correction entry.
+- **A punch-in at 09:35 for a 09:30 shift has zero late minutes:** It falls within the 10-minute grace period.
+- **Overtime remains zero for a punch-out less than 30 minutes after shift end:** The overtime threshold has not been met.
+- **`GET /` returning 404:** The root path is not necessarily part of the API contract; `/health` is the health-check endpoint.
+- **The local server reporting that port 8001 is already in use:** This indicates that another server process is already listening on that port, not necessarily an application defect.
+
+> **Review accuracy note:** Confirm each defect against the original starter implementation before submitting this table. In particular, the race-condition, timestamp-normalization, aggregation, and explain-plan entries should be retained only if the starter actually contains the described flaw. Replace broad references with exact function names or line numbers where possible.
